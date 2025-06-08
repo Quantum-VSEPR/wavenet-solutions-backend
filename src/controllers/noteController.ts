@@ -265,7 +265,101 @@ export const getMyNotes = async (
       sortOptions.updatedAt = sortOrder;
     }
 
-    const notes = await Note.find({ creator: userId })
+    const notesQuery = Note.find({ creator: userId, isArchived: false })
+      .sort(sortOptions)
+      .skip(skip)
+      .limit(limit)
+      .populate<{ creator: IUser }>("creator", "username email _id")
+      .populate<{
+        sharedWith: Array<{
+          userId: IUser;
+          role: "read" | "write";
+          email: string;
+        }>;
+      }>({
+        path: "sharedWith.userId",
+        select: "username email _id",
+      })
+      .lean(); // Use lean for potentially faster queries and plain JS objects
+
+    const notesFromDb = await notesQuery;
+
+    console.log(
+      "[getMyNotes] Notes found (before shared check):",
+      notesFromDb.length
+    );
+
+    // Augment notes to indicate if they are shared by the current user
+    const augmentedNotes = notesFromDb.map((note) => {
+      // A note is considered "shared by the current user" if they are the creator
+      // AND the sharedWith array is not empty.
+      const isSharedByCurrentUser =
+        note.sharedWith && note.sharedWith.length > 0;
+      return {
+        ...note,
+        isSharedByCurrentUser, // Add the new boolean flag
+      };
+    });
+
+    const totalNotes = await Note.countDocuments({
+      creator: userId,
+      isArchived: false, // Exclude archived notes from count
+    });
+    console.log("[getMyNotes] Total notes for user:", totalNotes);
+
+    res.status(200).json({
+      notes: augmentedNotes, // Send augmented notes
+      totalPages: Math.ceil(totalNotes / limit),
+      currentPage: page,
+      totalNotes,
+    });
+  } catch (err) {
+    console.error("[getMyNotes] Error:", err);
+    next(err);
+  }
+};
+
+export const getArchivedNotes = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  console.log(
+    "[getArchivedNotes] Called by user:",
+    req.user?._id,
+    "Query:",
+    req.query
+  );
+  try {
+    if (!req.user || !req.user._id) {
+      console.error("[getArchivedNotes] User not authenticated or _id missing");
+      res.status(401).json({
+        message: "User not authenticated or user ID is missing",
+      });
+      return;
+    }
+    const userId = req.user._id as Types.ObjectId;
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const skip = (page - 1) * limit;
+    const sortBy = (req.query.sortBy as string) || "archivedAt"; // Default sort by archivedAt
+    const sortOrderQuery = (req.query.sortOrder as string) || "desc";
+    const sortOrder: 1 | -1 = sortOrderQuery === "asc" ? 1 : -1;
+
+    const sortOptions: { [key: string]: 1 | -1 } = {};
+    if (sortBy === "title") {
+      sortOptions.title = sortOrder;
+    } else if (sortBy === "createdAt") {
+      sortOptions.createdAt = sortOrder;
+    } else if (sortBy === "updatedAt") {
+      sortOptions.updatedAt = sortOrder;
+    } else {
+      // Default to archivedAt
+      sortOptions.archivedAt = sortOrder;
+    }
+
+    const notes = await Note.find({ creator: userId, isArchived: true })
       .sort(sortOptions)
       .skip(skip)
       .limit(limit)
@@ -281,12 +375,16 @@ export const getMyNotes = async (
         select: "username email _id",
       });
 
-    console.log("[getMyNotes] Notes found:", notes.length);
+    console.log("[getArchivedNotes] Archived notes found:", notes.length);
 
     const totalNotes = await Note.countDocuments({
       creator: userId,
+      isArchived: true,
     });
-    console.log("[getMyNotes] Total notes for user:", totalNotes);
+    console.log(
+      "[getArchivedNotes] Total archived notes for user:",
+      totalNotes
+    );
 
     res.status(200).json({
       notes,
@@ -295,7 +393,7 @@ export const getMyNotes = async (
       totalNotes,
     });
   } catch (err) {
-    console.error("[getMyNotes] Error:", err);
+    console.error("[getArchivedNotes] Error:", err);
     next(err);
   }
 };
@@ -330,6 +428,7 @@ export const getSharedWithMeNotes = async (
 
     const notes = await Note.find({
       "sharedWith.userId": req.user._id as Types.ObjectId,
+      isArchived: false, // Exclude archived notes
     })
       .sort(sortOptions)
       .skip(skip)
@@ -348,6 +447,7 @@ export const getSharedWithMeNotes = async (
 
     const totalNotes = await Note.countDocuments({
       "sharedWith.userId": req.user._id as Types.ObjectId,
+      isArchived: false, // Exclude archived notes from count
     });
 
     res.status(200).json({
@@ -378,6 +478,7 @@ export const getAllUserNotes = async (
 
     const notes = await Note.find({
       $or: [{ creator: userId }, { "sharedWith.userId": userId }],
+      isArchived: false, // Exclude archived notes
     })
       .populate<{ creator: IUser }>("creator", "username email _id")
       .populate<{
@@ -801,6 +902,102 @@ export const unshareNote = async (
         .status(500)
         .json({ message: "Failed to retrieve note after unsharing." });
     }
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Controller to archive a note
+export const archiveNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const noteId = req.params.id;
+    if (!req.user || !req.user._id) {
+      res.status(401).json({ message: "User not authenticated" });
+      return;
+    }
+    const authenticatedUserId = req.user._id.toString();
+
+    const note = await Note.findById(noteId);
+
+    if (!note) {
+      res.status(404).json({ message: "Note not found" });
+      return;
+    }
+
+    // Only the creator can archive the note
+    if (note.creator.toString() !== authenticatedUserId) {
+      res.status(403).json({
+        message: "Permission denied: Only the owner can archive this note",
+      });
+      return;
+    }
+
+    if (note.isArchived) {
+      res.status(400).json({ message: "Note is already archived" });
+      return;
+    }
+
+    note.isArchived = true;
+    note.archivedAt = new Date();
+    await note.save();
+
+    // Emit a socket event for real-time update if needed
+    // io.to(note.creator.toString()).emit('noteArchived', note);
+    // note.sharedWith.forEach(share => io.to(share.userId.toString()).emit('noteArchived', note));
+
+    res.status(200).json(note);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Controller to unarchive a note
+export const unarchiveNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const noteId = req.params.id;
+    if (!req.user || !req.user._id) {
+      res.status(401).json({ message: "User not authenticated" });
+      return;
+    }
+    const authenticatedUserId = req.user._id.toString();
+
+    const note = await Note.findById(noteId);
+
+    if (!note) {
+      res.status(404).json({ message: "Note not found" });
+      return;
+    }
+
+    // Only the creator can unarchive the note
+    if (note.creator.toString() !== authenticatedUserId) {
+      res.status(403).json({
+        message: "Permission denied: Only the owner can unarchive this note",
+      });
+      return;
+    }
+
+    if (!note.isArchived) {
+      res.status(400).json({ message: "Note is not archived" });
+      return;
+    }
+
+    note.isArchived = false;
+    note.archivedAt = undefined; // Remove the archivedAt date
+    await note.save();
+
+    // Emit a socket event for real-time update if needed
+    // io.to(note.creator.toString()).emit('noteUnarchived', note);
+    // note.sharedWith.forEach(share => io.to(share.userId.toString()).emit('noteUnarchived', note));
+
+    res.status(200).json(note);
   } catch (err) {
     next(err);
   }

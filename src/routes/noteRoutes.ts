@@ -1,4 +1,4 @@
-import express from "express";
+import express, { RequestHandler } from "express"; // Import RequestHandler
 import {
   createNote,
   getMyNotes,
@@ -9,23 +9,40 @@ import {
   deleteNote,
   shareNote,
   unshareNote,
+  getArchivedNotes, // Added import
+  archiveNote, // Import the new controller function
+  unarchiveNote, // Import the new controller function
 } from "../controllers/noteController";
 import { protect } from "../middleware/authMiddleware";
 
 const router = express.Router();
 
 // Apply protect middleware to all note routes
-router.use(protect);
+router.use(protect as RequestHandler);
 
-router.route("/").post(createNote).get(getAllUserNotes); // Gets all notes (created by user and shared with user)
+router
+  .route("/")
+  .post(createNote as RequestHandler)
+  .get(getAllUserNotes as RequestHandler);
 
-router.get("/mynotes", getMyNotes); // Specifically get notes created by the user
-router.get("/sharedwithme", getSharedWithMeNotes); // Specifically get notes shared with the user
+router.get("/mynotes", getMyNotes as RequestHandler);
+router.get("/sharedwithme", getSharedWithMeNotes as RequestHandler);
+router.get("/archived", getArchivedNotes as RequestHandler); // Added route for archived notes
 
-router.route("/:id").get(getNoteById).put(updateNote).delete(deleteNote);
+router
+  .route("/:id")
+  .get(getNoteById as RequestHandler)
+  .put(updateNote as RequestHandler)
+  .delete(deleteNote as RequestHandler);
 
-router.post("/:id/share", shareNote);
-router.put("/:id/share", shareNote); // Add PUT method to also use shareNote for role updates
-router.delete("/:id/share/:userId", unshareNote); // Route to remove a specific user from a note's share list
+router.post("/:id/share", shareNote as RequestHandler);
+router.put("/:id/share", shareNote as RequestHandler); // Add PUT method to also use shareNote for role updates
+router.delete("/:id/share/:userId", unshareNote as RequestHandler); // Route to remove a specific user from a note's share list
+
+// Route to archive a note
+router.put("/:id/archive", archiveNote as RequestHandler);
+
+// Route to unarchive a note
+router.put("/:id/unarchive", unarchiveNote as RequestHandler);
 
 export default router;

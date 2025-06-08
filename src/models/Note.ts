@@ -13,6 +13,8 @@ export interface INote extends Document {
   sharedWith: IShare[];
   createdAt: Date;
   updatedAt: Date;
+  isArchived: boolean; // New field for archiving
+  archivedAt?: Date; // New field for tracking archive date
 }
 
 const ShareSchema: Schema<IShare> = new Schema(
@@ -55,6 +57,14 @@ const NoteSchema: Schema<INote> = new Schema(
       required: true,
     },
     sharedWith: [ShareSchema],
+    isArchived: {
+      type: Boolean,
+      default: false,
+      index: true, // Index for querying archived notes
+    },
+    archivedAt: {
+      type: Date,
+    },
   },
   { timestamps: true } // Adds createdAt and updatedAt automatically
 );
@@ -63,6 +73,16 @@ const NoteSchema: Schema<INote> = new Schema(
 NoteSchema.index({ creator: 1 });
 NoteSchema.index({ "sharedWith.userId": 1 });
 NoteSchema.index({ updatedAt: -1 });
+NoteSchema.index({ creator: 1, isArchived: 1, updatedAt: -1 }); // Compound index for fetching non-archived user notes
+NoteSchema.index({ "sharedWith.userId": 1, isArchived: 1, updatedAt: -1 }); // Compound index for fetching non-archived shared notes
+
+// Compound indexes for common sort orders combined with filters
+NoteSchema.index({ creator: 1, updatedAt: -1 });
+NoteSchema.index({ "sharedWith.userId": 1, updatedAt: -1 });
+
+// Optional: Compound indexes for title sorting (if frequently used)
+// NoteSchema.index({ creator: 1, title: 1 });
+// NoteSchema.index({ "sharedWith.userId": 1, title: 1 });
 
 const Note = mongoose.model<INote>("Note", NoteSchema);
 

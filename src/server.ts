@@ -12,6 +12,7 @@ import { rateLimiter } from "./middleware/rateLimiter";
 import authRoutes from "./routes/authRoutes";
 import noteRoutes from "./routes/noteRoutes";
 import userRoutes from "./routes/userRoutes";
+import { startArchivingJob } from "./services/archivingService"; // Import archiving service
 
 const app: Express = express();
 const server = http.createServer(app);
@@ -75,6 +76,7 @@ mongoose
     console.log("MongoDB Connected");
     server.listen(config.port, () => {
       console.log(`Server running on port ${config.port}`);
+      startArchivingJob(); // Start the archiving cron job
     });
   })
   .catch((err) => {
