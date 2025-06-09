@@ -710,108 +710,99 @@ export const shareNote = async (
       return;
     }
     const noteId = req.params.id;
-    if (!mongoose.Types.ObjectId.isValid(noteId)) {
-      res.status(400).json({ message: "Invalid note ID" });
-      return;
-    }
+    const { email, role } = value;
+    const authenticatedUserId = req.user._id.toString();
 
-    const { email, role } = value; // value is used now
+    const note = await Note.findById(noteId);
 
-    const noteToShare = (await Note.findById(noteId)
-      .populate<{ creator: IUser }>("creator", "username email _id")
-      .populate<{ sharedWith: Array<IShare & { userId: IUser }> }>({
-        path: "sharedWith.userId",
-        select: "username email _id",
-      })) as PopulatedNote | null;
-
-    if (!noteToShare) {
+    if (!note) {
       res.status(404).json({ message: "Note not found" });
       return;
     }
 
-    const authenticatedUserId = req.user._id.toString();
-
-    if (!checkPermissions(noteToShare, authenticatedUserId, "owner")) {
-      // No cast needed
-      res
-        .status(403)
-        .json({ message: "Only the owner can modify sharing permissions" });
+    // Check if the authenticated user is the owner of the note
+    if (note.creator.toString() !== authenticatedUserId) {
+      res.status(403).json({ message: "Only the owner can share this note" });
       return;
     }
 
-    const userToShareWith = (await UserModel.findOne({ email })) as
-      | (IUser & Document & { _id: Types.ObjectId })
-      | null;
+    const userToShareWith = await UserModel.findOne({ email });
     if (!userToShareWith) {
       res
         .status(404)
-        .json({ message: `User to share with (email: ${email}) not found` });
+        .json({ message: `User with email '${email}' not found.` });
       return;
     }
-    const userToShareWithId = userToShareWith._id;
 
-    if (userToShareWithId.toString() === authenticatedUserId) {
+    // Assert the type of userToShareWith._id to handle potential 'unknown' type
+    const idOfUserToShareWith = userToShareWith._id as
+      | mongoose.Types.ObjectId
+      | string;
+
+    if (idOfUserToShareWith.toString() === authenticatedUserId) {
       res
         .status(400)
         .json({ message: "You cannot share a note with yourself" });
       return;
     }
 
-    const existingShareIndex = noteToShare.sharedWith.findIndex(
-      (
-        s: Omit<IShare, "userId"> & { userId: IUser } // Explicitly type s
-      ) => getUserIdStringFromField(s.userId) === userToShareWithId.toString()
+    const existingShareIndex = note.sharedWith.findIndex(
+      (share) => share.userId.toString() === idOfUserToShareWith.toString()
     );
 
     if (existingShareIndex > -1) {
-      noteToShare.sharedWith[existingShareIndex].role = role as
-        | "read"
-        | "write";
-      noteToShare.sharedWith[existingShareIndex].email = userToShareWith.email;
+      // User is already in sharedWith, update their role
+      note.sharedWith[existingShareIndex].role = role;
+      note.sharedWith[existingShareIndex].email = userToShareWith.email; // Ensure email is up-to-date
     } else {
-      noteToShare.sharedWith.push({
-        userId: userToShareWithId as any, // Cast to any for Mongoose to handle ObjectId correctly
-        role: role as "read" | "write",
-        email: userToShareWith.email,
+      // Add new user to sharedWith
+      note.sharedWith.push({
+        // IShare.userId is Types.ObjectId. Assuming userToShareWith._id from a document is ObjectId.
+        userId: idOfUserToShareWith as mongoose.Types.ObjectId,
+        email: userToShareWith.email, // Store email for convenience
+        role,
       });
     }
 
-    const savedNote = await noteToShare.save();
+    await note.save();
 
-    const populatedNote = (await Note.findById(savedNote._id)
+    // Populate creator and sharedWith.userId fields for the response and socket emission
+    const populatedNote = await Note.findById(noteId)
       .populate<{ creator: IUser }>("creator", "username email _id")
-      .populate<{ sharedWith: Array<IShare & { userId: IUser }> }>({
+      .populate<{
+        sharedWith: Array<{
+          userId: IUser;
+          role: "read" | "write" | "owner";
+          email: string;
+        }>;
+      }>({
         path: "sharedWith.userId",
         select: "username email _id",
-      })) as PopulatedNote | null;
+      })
+      .lean(); // Use lean for plain JS object
 
-    if (populatedNote) {
-      // Emit to the note room that the note has been shared/updated
-      io.to(noteId).emit("noteShared", populatedNote);
-
-      // Emit to the user who the note was shared with
-      // Ensure req.user is not null and has a username before using it
-      const sharerUsername = req.user?.username || "Someone";
-      io.to(userToShareWithId.toString()).emit("noteSharedWithYou", {
-        noteId: populatedNote._id.toString(),
-        noteTitle: populatedNote.title,
-        sharedByUsername: sharerUsername,
-        message: `${sharerUsername} shared the note "${populatedNote.title}" with you.`,
-      });
-
-      // Emit to the owner that their note's sharing status has been updated
-      io.to(authenticatedUserId).emit("myNoteShareUpdated", populatedNote);
-
-      // Emit a general update for lists (optional, depending on frontend needs)
-      // Consider if this is redundant given the more specific events
-      io.emit("notesListUpdated", populatedNote);
-
-      res.status(200).json(populatedNote);
-    } else {
-      res
-        .status(500)
-        .json({ message: "Failed to retrieve note after sharing." });
+    if (!populatedNote) {
+      // Should not happen if save was successful, but good to check
+      res.status(404).json({ message: "Note not found after sharing" });
+      return;
     }
+
+    // Emit event to the user being shared with
+    // req.user is confirmed non-null by the check at the beginning of the function
+    io.to(idOfUserToShareWith.toString()).emit("noteSharedWithYou", {
+      noteId: populatedNote._id.toString(), // Changed from note._id
+      noteTitle: populatedNote.title, // Changed from note.title
+      sharedByUsername: req.user.username,
+      message: `Note \"${populatedNote.title}\" has been shared with you by ${req.user.username}.`,
+    });
+
+    // Emit event to the note room so other collaborators (including owner) get updated shared list
+    io.to(noteId).emit("noteSharingUpdated", {
+      noteId: populatedNote._id.toString(), // Changed from note._id
+      sharedWith: populatedNote.sharedWith, // Send the updated sharedWith list
+    });
+
+    res.status(200).json(populatedNote);
   } catch (err) {
     next(err);
   }
