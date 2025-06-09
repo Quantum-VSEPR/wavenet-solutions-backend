@@ -786,13 +786,26 @@ export const shareNote = async (
       })) as PopulatedNote | null;
 
     if (populatedNote) {
+      // Emit to the note room that the note has been shared/updated
       io.to(noteId).emit("noteShared", populatedNote);
-      io.to(userToShareWithId.toString()).emit(
-        "noteSharedWithYou",
-        populatedNote
-      );
+
+      // Emit to the user who the note was shared with
+      // Ensure req.user is not null and has a username before using it
+      const sharerUsername = req.user?.username || "Someone";
+      io.to(userToShareWithId.toString()).emit("noteSharedWithYou", {
+        noteId: populatedNote._id.toString(),
+        noteTitle: populatedNote.title,
+        sharedByUsername: sharerUsername,
+        message: `${sharerUsername} shared the note "${populatedNote.title}" with you.`,
+      });
+
+      // Emit to the owner that their note's sharing status has been updated
       io.to(authenticatedUserId).emit("myNoteShareUpdated", populatedNote);
+
+      // Emit a general update for lists (optional, depending on frontend needs)
+      // Consider if this is redundant given the more specific events
       io.emit("notesListUpdated", populatedNote);
+
       res.status(200).json(populatedNote);
     } else {
       res

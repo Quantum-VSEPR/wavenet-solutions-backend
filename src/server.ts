@@ -28,8 +28,8 @@ const io = new SocketIOServer(server, {
 app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 app.use(helmet());
 app.use(morgan(config.nodeEnv === "development" ? "dev" : "combined"));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50mb" })); // Increased payload size limit for JSON
+app.use(express.urlencoded({ limit: "50mb", extended: true })); // Increased payload size limit for URL-encoded
 app.use(cookieParser());
 app.use(rateLimiter); // Apply rate limiting to all requests
 
@@ -46,6 +46,14 @@ app.get("/", (_req: Request, res: Response) => {
 // Socket.IO connection
 io.on("connection", (socket) => {
   console.log("New client connected", socket.id);
+
+  // Listen for a custom event from the client to register its user ID
+  socket.on("registerUser", (userId: string) => {
+    if (userId) {
+      socket.join(userId); // Client joins a room named after their userId
+      console.log(`Socket ${socket.id} registered and joined room ${userId}`);
+    }
+  });
 
   socket.on("joinNoteRoom", (noteId: string) => {
     socket.join(noteId);
