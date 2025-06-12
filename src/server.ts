@@ -1,7 +1,7 @@
 import express, { Express, Request, Response } from "express";
 import http from "http";
-import { Server as SocketIOServer, Socket } from "socket.io"; // Added Socket type
-import mongoose from "mongoose"; // Ensure mongoose is imported if used in socket handlers
+import { Server as SocketIOServer } from "socket.io";
+import mongoose from "mongoose";
 import cors from "cors";
 import morgan from "morgan";
 import helmet from "helmet";
@@ -18,11 +18,8 @@ const app: Express = express();
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
   cors: {
-    origin:
-      config.nodeEnv === "development"
-        ? "http://localhost:3000"
-        : process.env.FRONTEND_URL, // More flexible origin
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: "http://localhost:3000", // Adjust this to your frontend URL
+    methods: ["*", "GET", "POST", "PUT", "DELETE"],
     credentials: true,
   },
 });
@@ -47,12 +44,13 @@ app.get("/", (_req: Request, res: Response) => {
 });
 
 // Socket.IO connection
-io.on("connection", (socket: Socket) => {
+io.on("connection", (socket) => {
   console.log("New client connected", socket.id);
 
+  // Listen for a custom event from the client to register its user ID
   socket.on("registerUser", (userId: string) => {
     if (userId) {
-      socket.join(userId);
+      socket.join(userId); // Client joins a room named after their userId
       console.log(`Socket ${socket.id} registered and joined room ${userId}`);
     }
   });
@@ -67,102 +65,9 @@ io.on("connection", (socket: Socket) => {
     console.log(`Socket ${socket.id} left room ${noteId}`);
   });
 
-  // Real-time content updates within a note room
-  socket.on(
-    "noteContentChange",
-    (data: { noteId: string; content: any; updatedBy: string }) => {
-      socket.to(data.noteId).emit("noteContentUpdated", {
-        noteId: data.noteId,
-        content: data.content,
-        updatedBy: data.updatedBy,
-      });
-      console.log(
-        `Content updated for note ${data.noteId} by ${data.updatedBy}, changes broadcasted.`
-      );
-    }
-  );
-
-  socket.on(
-    "userStartedEditingNote",
-    (data: { noteId: string; userId: string; username: string }) => {
-      socket.to(data.noteId).emit("otherUserStartedEditing", data);
-      console.log(`User ${data.username} started editing note ${data.noteId}`);
-    }
-  );
-
-  socket.on(
-    "userStoppedEditingNote",
-    (data: { noteId: string; userId: string; username: string }) => {
-      socket.to(data.noteId).emit("otherUserStoppedEditing", data);
-      console.log(`User ${data.username} stopped editing note ${data.noteId}`);
-    }
-  );
-
-  socket.on(
-    "userFinishedEditingNote",
-    async (data: {
-      noteId: string;
-      noteTitle: string;
-      editorUsername: string;
-      editorId: string;
-    }) => {
-      console.log(
-        `[Socket] Received userFinishedEditingNote from ${data.editorUsername} for note ${data.noteTitle}`
-      );
-      try {
-        const NoteModel = mongoose.model("Note"); // Use mongoose.model
-        const note = await NoteModel.findById(data.noteId)
-          .select("sharedWith creator")
-          .populate("sharedWith.userId", "username")
-          .populate("creator", "username")
-          .exec();
-
-        if (note) {
-          const collaboratorsToNotify: string[] = [];
-
-          if (
-            note.creator &&
-            (note.creator as any)._id.toString() !== data.editorId
-          ) {
-            collaboratorsToNotify.push((note.creator as any)._id.toString());
-          }
-
-          (note.sharedWith as any[]).forEach((share: any) => {
-            if (share.userId && share.userId._id.toString() !== data.editorId) {
-              collaboratorsToNotify.push(share.userId._id.toString());
-            }
-          });
-
-          const uniqueCollaboratorIds = [...new Set(collaboratorsToNotify)];
-
-          if (uniqueCollaboratorIds.length > 0) {
-            console.log(
-              `[Socket] Emitting noteEditFinishedByOtherUser to users: ${uniqueCollaboratorIds.join(
-                ", "
-              )} for note ${data.noteTitle}`
-            );
-            uniqueCollaboratorIds.forEach((userId) => {
-              io.to(userId).emit("noteEditFinishedByOtherUser", {
-                noteId: data.noteId,
-                noteTitle: data.noteTitle,
-                editorUsername: data.editorUsername,
-                editorId: data.editorId,
-              });
-            });
-          }
-        } else {
-          console.log(
-            `[Socket] Note not found for ID: ${data.noteId} during userFinishedEditingNote handling.`
-          );
-        }
-      } catch (error) {
-        console.error(
-          "[Socket] Error handling userFinishedEditingNote:",
-          error
-        );
-      }
-    }
-  );
+  socket.on("noteUpdate", (data: { noteId: string; content: string }) => {
+    socket.to(data.noteId).emit("noteUpdated", data);
+  });
 
   socket.on("disconnect", () => {
     console.log("Client disconnected", socket.id);
@@ -179,8 +84,6 @@ mongoose
     console.log("MongoDB Connected");
     server.listen(config.port, () => {
       console.log(`Server running on port ${config.port}`);
-      // Add this line to confirm Socket.IO is attached
-      console.log(`Socket.IO listening on port ${config.port}`);
       startArchivingJob(); // Start the archiving cron job
     });
   })

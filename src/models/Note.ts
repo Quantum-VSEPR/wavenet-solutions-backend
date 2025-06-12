@@ -7,7 +7,6 @@ export interface IShare {
 }
 
 export interface INote extends Document {
-  _id: Types.ObjectId; // Explicitly define _id type
   title: string;
   content: string;
   creator: Types.ObjectId; // User ID of the creator
