@@ -1,28 +1,16 @@
 import { Response, NextFunction } from "express";
-import Note, { IShare } from "../models/Note"; // Removed unused INote import
+import Note, { IShare } from "../models/Note"; // INote is defined in Note.ts
 import UserModel, { IUser } from "../models/User";
 import { AuthRequest } from "../middleware/authMiddleware";
 import mongoose, { Types } from "mongoose";
 import { io } from "../server";
-import {
-  PopulatedNote,
-  shareNoteSchema,
-  checkPermissions,
-  getUserIdStringFromField,
-} from "./noteUtils";
+import { PopulatedNote, shareNoteSchema, checkPermissions } from "./noteUtils";
 
-// Placeholder for a logger if you have one
 const logger = {
   info: console.log,
   error: console.error,
   warn: console.warn,
 };
-
-// Placeholder for getSocketIdForUser if needed for more specific notifications
-// const getSocketIdForUser = (userId: string): string | undefined => {
-//   // Implementation to get socket ID for a user
-//   return undefined;
-// };
 
 export const shareNote = async (
   req: AuthRequest,
@@ -69,12 +57,6 @@ export const shareNote = async (
 
     const authenticatedUserId = req.user._id.toString();
 
-    // Only the owner or those with write permission can share/manage shares
-    // Let's refine: typically only owner should add new people,
-    // but people with write might be able to change roles of existing people (depends on desired logic)
-    // For simplicity here, let's say 'write' permission is enough to modify shares.
-    // A stricter rule would be 'owner' for adding/removing, 'write' for role changes of existing.
-    // The original checkPermissions was used with "write" for updateNote, which is analogous.
     if (
       !checkPermissions(note as PopulatedNote, authenticatedUserId, "write")
     ) {
@@ -94,35 +76,31 @@ export const shareNote = async (
     }
 
     const userToShareWith = await UserModel.findOne({ email });
-    if (!userToShareWith) {
+    if (!userToShareWith || !userToShareWith._id) {
       res.status(404).json({ message: `User with email ${email} not found.` });
       return;
     }
 
-    const userToShareWithId = userToShareWith._id as Types.ObjectId; // Explicitly cast to Types.ObjectId
+    const userToShareWithId = userToShareWith._id;
 
-    // Check if already shared with this user
-    const existingShareIndex = note.sharedWith.findIndex(
-      (s) =>
-        getUserIdStringFromField(s.userId as Types.ObjectId | IUser) ===
-        userToShareWithId.toString()
-    );
+    const existingShareIndex = note.sharedWith.findIndex((s) => {
+      return s.userId && s.userId._id && s.userId._id.equals(userToShareWithId);
+    });
 
-    if (existingShareIndex > -1) {
-      // User already in sharedWith, update their role
+    const isUpdatingExistingShare = existingShareIndex > -1;
+
+    if (isUpdatingExistingShare) {
       note.sharedWith[existingShareIndex].role = role;
       logger.info(
         `[shareNote] Updated role for user ${userToShareWith.email} on note ${noteId} to ${role}`
       );
     } else {
-      // Add new user to sharedWith
       const newShare: IShare = {
-        // Explicitly type newShare as IShare
-        userId: userToShareWithId, // Already Types.ObjectId
+        userId: userToShareWithId,
         email: userToShareWith.email,
         role,
       };
-      note.sharedWith.push(newShare as any); // Cast to any to satisfy TypeScript due to population
+      note.sharedWith.push(newShare as any);
       logger.info(
         `[shareNote] Shared note ${noteId} with user ${userToShareWith.email} with role ${role}`
       );
@@ -130,7 +108,6 @@ export const shareNote = async (
 
     const savedNote = await note.save();
 
-    // Populate for response and notification
     const populatedSavedNote = (await Note.findById(savedNote._id)
       .populate<{ creator: IUser }>("creator", "username email _id")
       .populate<{
@@ -144,51 +121,108 @@ export const shareNote = async (
         select: "username email _id",
       })) as PopulatedNote | null;
 
-    if (populatedSavedNote) {
-      // Emit to the note's room
-      io.to(noteId).emit("noteUpdated", populatedSavedNote);
-      io.to(noteId).emit("noteShared", {
-        noteId,
-        sharedWithUser: {
-          _id: userToShareWithId,
-          email: userToShareWith.email,
-          username: userToShareWith.username,
-        },
-        role,
-      });
+    if (
+      populatedSavedNote &&
+      populatedSavedNote._id &&
+      req.user &&
+      userToShareWith
+    ) {
+      const sharerUsername = req.user.username;
+      const noteTitle = populatedSavedNote.title;
 
-      // Emit to general list update
-      io.emit("notesListUpdated", {
-        action: "share", // Or "update" if more generic
-        noteId: populatedSavedNote._id.toString(),
-        // Include enough data for list updates
-        title: populatedSavedNote.title,
-        updatedAt: populatedSavedNote.updatedAt,
-        creator: populatedSavedNote.creator,
-        sharedWith: populatedSavedNote.sharedWith,
-      });
+      if (isUpdatingExistingShare) {
+        // Notify the user whose role was updated
+        io.to(userToShareWithId.toString()).emit("noteSharingUpdated", {
+          note: populatedSavedNote.toObject(),
+          message: `Your role for note '${noteTitle}' was updated to '${role}' by ${sharerUsername}.`,
+          actor: "other",
+        });
+        logger.info(
+          `Emitted 'noteSharingUpdated' (role update) to user ${userToShareWithId.toString()} for note ${noteId}`
+        );
 
-      // Specific notification to the user being shared with
-      const targetSocketId = getUserIdStringFromField(userToShareWithId); // userToShareWithId is now Types.ObjectId
-      if (targetSocketId) {
-        // io.to(targetSocketId).emit("sharedWithYou", populatedSavedNote);
-        // Or a more generic notification system
+        // REMOVED: Loop that notified other collaborators with 'noteSharingUpdated'
+        // Their UIs will rely on 'noteDetailsUpdated' for silent refresh if the note is open,
+        // and 'notesListGlobalUpdate' (without a message) for list refreshes.
+      } else {
+        // This is a new share
+        // Notify the newly shared user
+        const newSharedNotePayload = {
+          _id: populatedSavedNote._id.toString(),
+          title: populatedSavedNote.title,
+          content: populatedSavedNote.content,
+          creator: {
+            _id: (populatedSavedNote.creator as IUser)._id.toString(),
+            username: (populatedSavedNote.creator as IUser).username,
+            email: (populatedSavedNote.creator as IUser).email,
+          },
+          sharedWith: populatedSavedNote.sharedWith.map((sw) => ({
+            userId:
+              typeof sw.userId === "string"
+                ? sw.userId
+                : {
+                    _id: (sw.userId as IUser)._id.toString(),
+                    username: (sw.userId as IUser).username,
+                    email: (sw.userId as IUser).email,
+                  },
+            role: sw.role,
+            email: sw.email,
+          })),
+          isArchived: populatedSavedNote.isArchived,
+          updatedAt: populatedSavedNote.updatedAt.toISOString(),
+          sharerUsername: sharerUsername,
+        };
+        io.to(userToShareWithId.toString()).emit(
+          "newSharedNote",
+          newSharedNotePayload
+        );
+        logger.info(
+          `Emitted 'newSharedNote' to user ${userToShareWithId.toString()} for note ${populatedSavedNote._id.toString()} by sharer ${sharerUsername}.`
+        );
       }
-      io.to(userToShareWithId.toString()).emit("notification", {
-        // userToShareWithId is Types.ObjectId
-        type: "note_shared",
-        message: `Note '${populatedSavedNote.title}' has been shared with you by ${req.user.username}.`,
-        noteId: populatedSavedNote._id.toString(),
+
+      // Notify the owner (sharer) - this happens for both new share and role update
+      io.to(req.user._id.toString()).emit("noteSharingUpdated", {
+        note: populatedSavedNote.toObject(),
+        message: isUpdatingExistingShare
+          ? `You updated ${userToShareWith.username}'s role to '${role}' for note '${noteTitle}'.`
+          : `You shared '${noteTitle}' with ${userToShareWith.email}.`,
+        actor: "self",
       });
+      logger.info(
+        `Emitted 'noteSharingUpdated' (self) to owner ${req.user._id.toString()} for note ${populatedSavedNote._id.toString()}`
+      );
+
+      // Emit to the general note room for UI updates (e.g., collaborator list)
+      io.to(noteId).emit("noteDetailsUpdated", populatedSavedNote.toObject());
+      logger.info(`Emitted 'noteDetailsUpdated' to room ${noteId}`);
+
+      // Emit a global list update for dashboard/list views
+      io.emit("notesListGlobalUpdate", {
+        action: "share_update",
+        noteId: populatedSavedNote._id.toString(),
+        updatedNote: populatedSavedNote.toObject(), // Keep sending updatedNote for frontend checks
+        actorId: req.user._id.toString(),
+        // Ensure no specific message is sent here for role updates to avoid duplicate/confusing notifications
+        // message: isUpdatingExistingShare ? undefined : `A note's sharing status was updated.`
+        // Let's rely on the frontend to not generate a default message for 'share_update' if no message is provided.
+      });
+      logger.info(
+        `Emitted 'notesListGlobalUpdate' (action: share_update) for note ${noteId}`
+      );
 
       res.status(200).json(populatedSavedNote);
     } else {
-      res
-        .status(500)
-        .json({ message: "Failed to retrieve note after sharing." });
+      logger.error(
+        "[shareNote] Failed to populate note after saving share or missing critical data."
+      );
+      res.status(500).json({
+        message: "Failed to process share operation due to server error.",
+      });
     }
-  } catch (err) {
-    next(err);
+  } catch (error) {
+    logger.error(`[shareNote] Error sharing note ${req.params.id}:`, error);
+    next(error);
   }
 };
 
@@ -206,85 +240,95 @@ export const unshareNote = async (
     }
 
     const noteId = req.params.id;
-    const userIdToUnshare = req.params.userId; // ID of the user to remove from sharing
+    const userIdToUnshareString = req.params.userId;
 
     if (!mongoose.Types.ObjectId.isValid(noteId)) {
       res.status(400).json({ message: "Invalid note ID" });
       return;
     }
-    if (!mongoose.Types.ObjectId.isValid(userIdToUnshare)) {
+    if (!mongoose.Types.ObjectId.isValid(userIdToUnshareString)) {
       res.status(400).json({ message: "Invalid user ID to unshare" });
       return;
     }
 
+    const userToUnshareObjectId = new Types.ObjectId(userIdToUnshareString);
+
     const note = await Note.findById(noteId)
       .populate<{ creator: IUser }>("creator", "username email _id")
       .populate<{
-        sharedWith: Array<{
-          userId: IUser;
-          role: "read" | "write";
-          email: string;
-        }>;
+        sharedWith: Array<{ userId: IUser; role: string; email: string }>;
       }>({
-        path: "sharedWith.userId",
+        path: "sharedWith.userId", // Populate userId within sharedWith
         select: "username email _id",
       });
 
-    if (!note) {
+    if (!note || !note._id) {
+      // Check note and note._id
       res.status(404).json({ message: "Note not found" });
       return;
     }
 
-    const authenticatedUserId = req.user._id.toString();
-    const noteCreatorId = getUserIdStringFromField(
-      note.creator as Types.ObjectId | IUser
-    );
+    if (!note.creator || !note.creator._id) {
+      // Check creator and creator._id
+      logger.error(
+        `[unshareNote] Note ${noteId} found, but creator information is missing or invalid.`
+      );
+      res
+        .status(500)
+        .json({ message: "Note creator information is missing or invalid." });
+      return;
+    }
+    const authenticatedUserId = req.user._id; // This is Types.ObjectId
 
-    // Permission check:
-    // 1. The note owner can unshare from anyone.
-    // 2. A user can unshare themselves (if they are `userIdToUnshare`).
-    // 3. Users with 'write' permission (who are not the owner) generally shouldn't be able to unshare others,
-    //    unless specific business logic allows it. For now, only owner or self-unshare.
-
-    let canUnshare = false;
-    if (noteCreatorId === authenticatedUserId) {
-      canUnshare = true; // Owner can unshare anyone
-    } else if (userIdToUnshare === authenticatedUserId) {
-      canUnshare = true; // User can unshare themselves
+    if (!note.creator._id.equals(authenticatedUserId)) {
+      // Compare ObjectIds
+      res
+        .status(403)
+        .json({ message: "You do not have permission to unshare this note" });
+      return;
     }
 
-    if (!canUnshare) {
-      // Fallback to check general 'write' permission if not owner or self-unsharing,
-      // though this might be too permissive for unsharing *others*.
-      // The original logic used 'write' for general share management.
-      // Let's stick to owner or self-unshare for removing someone.
-      // If general 'write' permission should allow unsharing others, then use:
-      // if (!checkPermissions(note as PopulatedNote, authenticatedUserId, "write")) { ... }
-      res.status(403).json({
+    const initialSharedWithCount = note.sharedWith.length;
+
+    // Before filtering, ensure the user to unshare was actually in the list
+    const userWasInList = note.sharedWith.some(
+      (s) =>
+        s.userId && s.userId._id && s.userId._id.equals(userToUnshareObjectId)
+    );
+
+    if (!userWasInList) {
+      res
+        .status(404)
+        .json({ message: "User not found in the shared list of this note." });
+      return;
+    }
+
+    note.sharedWith = note.sharedWith.filter((s) => {
+      // s.userId is populated as IUser, so s.userId._id is the ObjectId
+      return !(
+        s.userId &&
+        s.userId._id &&
+        s.userId._id.equals(userToUnshareObjectId)
+      );
+    });
+
+    // This check might be redundant if the userWasInList check is sufficient,
+    // but can be a safeguard if the filter logic had an unexpected issue.
+    if (note.sharedWith.length === initialSharedWithCount) {
+      // This case should ideally not be reached if userWasInList was true and filter is correct
+      logger.warn(
+        `[unshareNote] User ${userIdToUnshareString} was in shared list for note ${noteId}, but filter did not remove. This indicates an issue.`
+      );
+      res.status(400).json({
         message:
-          "You do not have permission to unshare this user from the note.",
+          "User found in shared list, but failed to unshare. Please try again.",
       });
       return;
     }
 
-    const shareIndex = note.sharedWith.findIndex(
-      (s) =>
-        getUserIdStringFromField(s.userId as Types.ObjectId | IUser) ===
-        userIdToUnshare
-    );
-
-    if (shareIndex === -1) {
-      res
-        .status(404)
-        .json({ message: "User not found in the share list of this note." });
-      return;
-    }
-
-    // const unsharedUser = note.sharedWith[shareIndex]; // Removed unused variable
-    note.sharedWith.splice(shareIndex, 1);
     const savedNote = await note.save();
 
-    const populatedSavedNote = (await Note.findById(savedNote._id)
+    const populatedNoteAfterUnshare = (await Note.findById(savedNote._id) // savedNote._id is Types.ObjectId
       .populate<{ creator: IUser }>("creator", "username email _id")
       .populate<{
         sharedWith: Array<{
@@ -297,30 +341,90 @@ export const unshareNote = async (
         select: "username email _id",
       })) as PopulatedNote | null;
 
-    if (populatedSavedNote) {
-      io.to(noteId).emit("noteUpdated", populatedSavedNote);
-      io.to(noteId).emit("noteUnshared", {
-        noteId,
-        unsharedUserId: userIdToUnshare,
-      });
+    if (populatedNoteAfterUnshare && populatedNoteAfterUnshare._id) {
+      const unsharedUserObjectIdString = userIdToUnshareString;
+      const unsharedUserDetails = await UserModel.findById(
+        unsharedUserObjectIdString
+      )
+        .select("email username")
+        .lean();
+      const unsharedUserEmail = unsharedUserDetails
+        ? unsharedUserDetails.email
+        : "the user";
 
-      io.emit("notesListUpdated", {
-        action: "unshare", // Or "update"
-        noteId: populatedSavedNote._id.toString(),
-        title: populatedSavedNote.title,
-        updatedAt: populatedSavedNote.updatedAt,
-        creator: populatedSavedNote.creator,
-        sharedWith: populatedSavedNote.sharedWith,
+      // Notify the user who was unshared
+      io.to(unsharedUserObjectIdString).emit("noteUnshared", {
+        noteId: populatedNoteAfterUnshare._id.toString(),
+        title: populatedNoteAfterUnshare.title,
+        unsharerUsername: req.user!.username,
+        message: `You were unshared from the note '${
+          populatedNoteAfterUnshare.title
+        }' by ${req.user!.username}.`,
       });
+      logger.info(
+        `Emitted 'noteUnshared' to user ${unsharedUserObjectIdString} for note ${populatedNoteAfterUnshare._id.toString()} by unsharer ${
+          req.user!.username
+        }`
+      );
 
-      // Notify the unshared user
-      io.to(userIdToUnshare).emit("notification", {
-        type: "note_unshared",
-        message: `You are no longer a collaborator on note '${populatedSavedNote.title}'.`,
-        noteId: populatedSavedNote._id.toString(),
+      // Notify the note owner (unsharer)
+      io.to(req.user!._id.toString()).emit("noteSharingUpdated", {
+        note: populatedNoteAfterUnshare.toObject(),
+        message: `You unshared '${populatedNoteAfterUnshare.title}' from ${unsharedUserEmail}.`,
+        actor: "self",
       });
+      logger.info(
+        `Emitted 'noteSharingUpdated' to unsharer (owner) ${req.user._id.toString()} for note ${populatedNoteAfterUnshare._id.toString()}`
+      );
 
-      res.status(200).json(populatedSavedNote);
+      // REMOVE notification to remaining collaborators about who was unshared.
+      // They will receive 'noteDetailsUpdated' to refresh their view if the note is open.
+      // populatedNoteAfterUnshare.sharedWith.forEach((share) => {
+      //   if (share.userId && share.userId._id) {
+      //     const collaboratorIdStr = share.userId._id.toString();
+      //     io.to(collaboratorIdStr).emit("noteSharingUpdated", {
+      //       note: populatedNoteAfterUnshare.toObject(),
+      //       // NO message or a very generic one if absolutely necessary for some UI update,
+      //       // but ideally, no direct notification about *who* was removed.
+      //       actor: "other",
+      //       actionType: "unshare_others_view"
+      //     });
+      //     logger.info(
+      //       `Emitted \'noteSharingUpdated\' (unshare_others_view) to remaining collaborator ${collaboratorIdStr} for note ${populatedNoteAfterUnshare._id!.toString()} after unshare by ${
+      //         req.user!.username
+      //       }`
+      //     );
+      //   }
+      // });
+
+      // Emit to the general note room for UI updates (e.g., collaborator list in NoteEditor)
+      io.to(noteId).emit(
+        "noteDetailsUpdated",
+        populatedNoteAfterUnshare.toObject()
+      );
+      logger.info(
+        `Emitted 'noteDetailsUpdated' to room ${noteId} after unshare.`
+      );
+
+      // General event for lists
+      io.emit("notesListGlobalUpdate", {
+        action: "unshare_update",
+        noteId: populatedNoteAfterUnshare._id.toString(),
+        removedUserId: unsharedUserObjectIdString,
+        updatedNote: populatedNoteAfterUnshare.toObject(),
+        actorId: req.user!._id.toString(),
+        // message: `${req.user!.username} unshared note \'${
+        //   populatedNoteAfterUnshare.title
+        // }\' from ${unsharedUserEmail}.`, // Message removed to prevent duplicate notifications for collaborators
+      });
+      logger.info(
+        `Emitted 'notesListGlobalUpdate' due to unshare action on note ${populatedNoteAfterUnshare._id.toString()}`
+      );
+
+      res.status(200).json({
+        message: "User unshared successfully.",
+        note: populatedNoteAfterUnshare,
+      });
     } else {
       res
         .status(500)

@@ -42,14 +42,10 @@ export const getArchivedNotes = async (
       sortOptions.updatedAt = sortOrder;
     }
 
-    // Find notes created by the user OR shared with the user, that are archived
+    // Find notes created by the user AND are archived
     const notes = await Note.find({
-      $and: [
-        { isArchived: true },
-        {
-          $or: [{ creator: userId }, { "sharedWith.userId": userId }],
-        },
-      ],
+      creator: userId, // Only notes created by the user
+      isArchived: true,
     })
       .sort(sortOptions)
       .skip(skip)
@@ -68,12 +64,8 @@ export const getArchivedNotes = async (
       .lean();
 
     const totalNotes = await Note.countDocuments({
-      $and: [
-        { isArchived: true },
-        {
-          $or: [{ creator: userId }, { "sharedWith.userId": userId }],
-        },
-      ],
+      creator: userId, // Only count notes created by the user
+      isArchived: true,
     });
 
     res.status(200).json({
@@ -139,6 +131,18 @@ export const archiveNote = async (
       return;
     }
 
+    // If the user archiving the note is the creator, also clear the sharedWith list
+    if (
+      note.creator &&
+      req.user &&
+      note.creator._id.toString() === req.user._id.toString()
+    ) {
+      note.sharedWith = [];
+      console.log(
+        `[archiveNote] Owner ${req.user._id.toString()} is archiving note ${note._id.toString()}. Clearing sharedWith list.`
+      );
+    }
+
     note.isArchived = true;
     const savedNote = await note.save();
 
@@ -161,6 +165,7 @@ export const archiveNote = async (
       noteId: (savedNote._id as Types.ObjectId).toString(), // Cast to Types.ObjectId
       isArchived: true,
       note: populatedSavedNote,
+      actorId: req.user._id.toString(), // Added actorId
     });
 
     res.status(200).json(populatedSavedNote);
@@ -243,6 +248,7 @@ export const unarchiveNote = async (
       noteId: (savedNote._id as Types.ObjectId).toString(), // Cast to Types.ObjectId
       isArchived: false,
       note: populatedSavedNote,
+      actorId: req.user._id.toString(), // Added actorId
     });
 
     res.status(200).json(populatedSavedNote);

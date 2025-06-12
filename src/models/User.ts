@@ -1,7 +1,8 @@
-import mongoose, { Schema, Document } from "mongoose";
+import mongoose, { Schema, Document, Types } from "mongoose"; // Added Types
 import bcrypt from "bcrypt";
 
 export interface IUser extends Document {
+  _id: Types.ObjectId; // Explicitly define _id type
   username: string;
   email: string;
   password?: string; // Optional because it will be removed in toJSON
