@@ -32,10 +32,26 @@ export const createNote = async (
     }
 
     const { title, content } = value;
+    const userId = req.user._id as Types.ObjectId;
+
+    // Check for existing note with the same title for this user and is not archived
+    const existingNote = await Note.findOne({
+      title,
+      creator: userId,
+      isArchived: false,
+    });
+    if (existingNote) {
+      res.status(409).json({
+        message:
+          "A note with this title already exists and is not archived. Please use a different title or check your archived notes.",
+      }); // 409 Conflict
+      return;
+    }
+
     const note: INote = await Note.create({
       title,
       content,
-      creator: req.user._id as Types.ObjectId, // Cast to Types.ObjectId
+      creator: userId, // Cast to Types.ObjectId
       sharedWith: [],
       isArchived: false, // Default value
     });
@@ -47,9 +63,10 @@ export const createNote = async (
         _id: (note._id as Types.ObjectId).toString(),
         title: note.title,
         updatedAt: note.updatedAt,
-        creator: { _id: req.user._id, username: req.user.username }, // Send minimal creator info
+        creator: { _id: req.user._id, username: (req.user as any).username }, // Added 'as any' for username, ensure it's populated or handle if not
         sharedWith: [], // New notes are not shared initially
       },
+      actorId: req.user._id.toString(), // Added actorId
     });
 
     res.status(201).json(note);
@@ -316,101 +333,120 @@ export const updateNote = async (
     }
 
     if (!req.user || !req.user._id) {
-      res
-        .status(401)
-        .json({ message: "User not authenticated or user ID missing" });
+      res.status(401).json({ message: "User not authenticated" });
       return;
     }
+
     const noteId = req.params.id;
     if (!mongoose.Types.ObjectId.isValid(noteId)) {
       res.status(400).json({ message: "Invalid note ID" });
       return;
     }
 
-    // Fetch the note as a Mongoose document to use .save()
-    const noteInstance = await Note.findById(noteId);
+    const { title, content, isAutoSave } = value; // Added isAutoSave
+    const userId = req.user._id.toString();
+    const username = req.user.username;
 
-    if (!noteInstance) {
+    const note = await Note.findById(noteId);
+
+    if (!note) {
       res.status(404).json({ message: "Note not found" });
       return;
     }
 
-    // Now cast to PopulatedNote for permission checking after populating separately if needed,
-    // or ensure checkPermissions can handle INote. The current checkPermissions handles INote.
-    // For permission check, we need a structure that checkPermissions understands.
-    // Let's re-fetch with population for consistent permission checking structure.
-    const noteToCheckPermissions = (await Note.findById(noteId)
-      .populate<{ creator: IUser }>("creator", "username email _id")
-      .populate<{
-        sharedWith: Array<{
-          userId: IUser;
-          role: "read" | "write";
-          email: string;
-        }>;
-      }>({
-        path: "sharedWith.userId",
-        select: "username email _id",
-      })) as PopulatedNote | null;
-
-    if (!noteToCheckPermissions) {
-      // Should not happen if noteInstance was found, but as a safeguard
-      res
-        .status(404)
-        .json({ message: "Note disappeared before permission check" });
-      return;
-    }
-
-    const authenticatedUserId = req.user._id.toString();
-
-    if (
-      !checkPermissions(noteToCheckPermissions, authenticatedUserId, "write")
-    ) {
+    const hasPermission = checkPermissions(note, userId, "write");
+    if (!hasPermission) {
       res
         .status(403)
         .json({ message: "You do not have permission to edit this note" });
       return;
     }
 
-    // Apply updates to the original Mongoose document instance
-    const { title, content } = value;
-    if (title !== undefined) noteInstance.title = title;
-    if (content !== undefined) noteInstance.content = content;
-    // noteInstance.updatedAt will be updated by Mongoose by default due to timestamps: true in schema
+    // Update note fields
+    if (title !== undefined) note.title = title;
+    if (content !== undefined) note.content = content;
+    // note.lastUpdatedBy = userId; // This might be useful for tracking
 
-    const savedNote = await noteInstance.save();
+    const updatedNote = await note.save();
 
-    // Populate the saved note for the response
-    const populatedSavedNote = (await Note.findById(savedNote._id)
-      .populate<{ creator: IUser }>("creator", "username email _id")
-      .populate<{
-        sharedWith: Array<{
-          userId: IUser;
-          role: "read" | "write";
-          email: string;
-        }>;
-      }>({
-        path: "sharedWith.userId",
-        select: "username email _id",
-      })) as PopulatedNote | null;
+    // Ensure updatedNote is treated as INote for type safety
+    const typedUpdatedNote = updatedNote as INote;
 
-    if (populatedSavedNote) {
-      io.to(noteId).emit("noteUpdated", populatedSavedNote);
-      // Emit event for notes list update
-      io.emit("notesListUpdated", {
-        action: "update",
-        noteId: populatedSavedNote._id.toString(),
-        title: populatedSavedNote.title,
-        updatedAt: populatedSavedNote.updatedAt,
-        creator: populatedSavedNote.creator, // Send populated creator
-        sharedWith: populatedSavedNote.sharedWith, // Send populated sharedWith
-      });
-      res.status(200).json(populatedSavedNote);
-    } else {
-      // This case should ideally not be reached if save was successful
-      res
-        .status(500)
-        .json({ message: "Failed to retrieve note after update." });
+    // Emit event for notes list update (e.g., if title or summary changed)
+    // This ensures the list view is current for all users who can see this note.
+    io.to(noteId).emit("notesListUpdated", {
+      action: "update", // A generic update action
+      note: {
+        _id: (typedUpdatedNote._id as Types.ObjectId).toString(),
+        title: typedUpdatedNote.title,
+        updatedAt: typedUpdatedNote.updatedAt,
+        // Potentially other fields needed for list display
+      },
+      actorId: userId,
+    });
+
+    // Emit an event to the updater (current user) for a toast notification
+    // This is a specific event for the user who performed the update.
+    io.to(userId).emit("noteUpdateSuccess", {
+      noteId: (typedUpdatedNote._id as Types.ObjectId).toString(),
+      title: typedUpdatedNote.title,
+      message: `Note '${typedUpdatedNote.title}' updated successfully.`,
+      isAutoSave: !!isAutoSave, // Pass along if it was an autosave
+    });
+
+    // If it's NOT an autosave, then notify other collaborators for a bell notification.
+    if (!isAutoSave) {
+      const populatedNote = await Note.findById(typedUpdatedNote._id)
+        .populate<{
+          creator: { _id: mongoose.Types.ObjectId; username: string };
+        }>("creator", "username _id")
+        .populate<{
+          sharedWith: Array<{
+            userId: { _id: mongoose.Types.ObjectId; username: string };
+            role: string;
+          }>;
+        }>("sharedWith.userId", "username _id")
+        .lean();
+
+      if (populatedNote) {
+        const collaboratorsToNotify: string[] = [];
+        if (
+          populatedNote.creator &&
+          populatedNote.creator._id.toString() !== userId
+        ) {
+          collaboratorsToNotify.push(populatedNote.creator._id.toString());
+        }
+        populatedNote.sharedWith.forEach((share) => {
+          if (share.userId && share.userId._id.toString() !== userId) {
+            collaboratorsToNotify.push(share.userId._id.toString());
+          }
+        });
+
+        const uniqueCollaboratorIds = [...new Set(collaboratorsToNotify)];
+        if (uniqueCollaboratorIds.length > 0) {
+          const notificationPayload = {
+            noteId: populatedNote._id.toString(),
+            noteTitle: populatedNote.title,
+            editorUsername: username, // Username of the person who made the change
+            message: `${username} updated the note '${populatedNote.title}'.`,
+            updatedAt: populatedNote.updatedAt.toISOString(),
+            type: "info",
+            actionable: true, // Or based on significance
+          };
+          uniqueCollaboratorIds.forEach((collaboratorId) => {
+            io.to(collaboratorId).emit(
+              "notifyNoteUpdatedByOther",
+              notificationPayload
+            );
+          });
+          console.log(
+            `[updateNote API] Emitted 'notifyNoteUpdatedByOther' to ${uniqueCollaboratorIds.length} collaborators for note ${populatedNote.title}`
+          );
+        }
+      }
     }
+
+    res.status(200).json(updatedNote);
   } catch (err) {
     next(err);
   }
@@ -462,7 +498,52 @@ export const deleteNote = async (
     await Note.findByIdAndDelete(noteId);
 
     io.to(noteId).emit("noteDeleted", { noteId }); // Notify clients viewing this specific note
-    io.emit("notesListUpdated", { action: "delete", noteId }); // Notify all clients to update their lists
+    // For delete, the frontend expects `note` object with at least an _id and title for the notification.
+    // However, the note is already deleted. We should send the minimal required info.
+    // The frontend handler `handleNotesListUpdated` uses `data.note.title` and `data.note._id`.
+    // We need to ensure `note` (the object before deletion) is available here or pass its details.
+
+    // Determine creator info for the notification payload
+    // Assuming 'note.creator' is an ObjectId here as it's not explicitly populated with .populate() in this function before this point.
+    let creatorPayloadId = "unknown_creator_id";
+    let creatorPayloadUsername = "Unknown User";
+
+    if (note.creator) {
+      // Check if note.creator is an ObjectId or a string representation of an ID
+      if (typeof note.creator.toString === "function") {
+        creatorPayloadId = note.creator.toString();
+      }
+
+      // In the less likely event that note.creator was somehow a populated object here,
+      // attempt to get username and a more definitive _id.
+      if (typeof note.creator === "object" && note.creator !== null) {
+        const potentialCreatorObj = note.creator as any; // Use 'any' for robust property access
+        if (
+          potentialCreatorObj._id &&
+          typeof potentialCreatorObj._id.toString === "function"
+        ) {
+          creatorPayloadId = potentialCreatorObj._id.toString();
+        }
+        if (typeof potentialCreatorObj.username === "string") {
+          creatorPayloadUsername = potentialCreatorObj.username;
+        }
+      }
+    }
+
+    io.emit("notesListUpdated", {
+      action: "delete",
+      note: {
+        _id: noteId,
+        title: note.title, // Assuming 'note' still holds the data before deletion
+        creator: {
+          _id: creatorPayloadId,
+          username: creatorPayloadUsername,
+        },
+        sharedWith: [], // Or reconstruct if necessary, but likely not needed for delete notification
+        updatedAt: new Date().toISOString(), // Or use note.updatedAt if available
+      },
+      actorId: req.user._id.toString(), // Added actorId
+    });
 
     res.status(200).json({ message: "Note deleted successfully" });
   } catch (err) {

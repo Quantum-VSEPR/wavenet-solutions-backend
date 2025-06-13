@@ -1,7 +1,7 @@
 import { Response, NextFunction } from "express";
+import mongoose, { Types } from "mongoose";
 import Note from "../models/Note";
 import { AuthRequest } from "../middleware/authMiddleware";
-import mongoose, { Types } from "mongoose";
 import { PopulatedNote, checkPermissions } from "./noteUtils";
 import { IUser } from "../models/User"; // Required for PopulatedNote and checkPermissions context
 import { io } from "../server"; // For real-time updates
@@ -206,7 +206,7 @@ export const unarchiveNote = async (
     }
 
     const authenticatedUserId = req.user._id.toString();
-    // User needs write permission to archive/unarchive
+
     if (
       !checkPermissions(note as PopulatedNote, authenticatedUserId, "write")
     ) {
@@ -222,31 +222,38 @@ export const unarchiveNote = async (
     }
 
     note.isArchived = false;
+    note.archivedAt = undefined; // Clear the archivedAt date
     const savedNote = await note.save();
 
-    const populatedSavedNote = await Note.findById(savedNote._id)
-      .populate<{ creator: IUser }>("creator", "username email _id")
-      .populate<{
-        sharedWith: Array<{
-          userId: IUser;
-          role: "read" | "write";
-          email: string;
-        }>;
-      }>({
-        path: "sharedWith.userId",
-        select: "username email _id",
-      });
+    const populatedUnarchivedNote = savedNote as PopulatedNote;
 
-    io.to(noteId).emit("noteUpdated", populatedSavedNote); // Notify clients viewing this specific note
-    io.emit("notesListUpdated", {
-      action: "unarchive",
-      noteId: (savedNote._id as Types.ObjectId).toString(), // Cast to Types.ObjectId
-      isArchived: false,
-      note: populatedSavedNote,
+    io.to(noteId).emit("noteUnarchived", {
+      noteId: populatedUnarchivedNote._id.toString(),
+      title: populatedUnarchivedNote.title,
+      note: populatedUnarchivedNote,
     });
 
-    res.status(200).json(populatedSavedNote);
+    io.emit("notesListUpdated", {
+      action: "unarchive",
+      note: {
+        _id: populatedUnarchivedNote._id.toString(),
+        title: populatedUnarchivedNote.title,
+        updatedAt: populatedUnarchivedNote.updatedAt,
+        creator: populatedUnarchivedNote.creator,
+        sharedWith: populatedUnarchivedNote.sharedWith,
+        isArchived: populatedUnarchivedNote.isArchived,
+      },
+      actorId: req.user._id.toString(),
+    });
+
+    res.status(200).json(populatedUnarchivedNote);
   } catch (err) {
+    const noteIdForError =
+      req.params && req.params.id ? req.params.id : "unknown";
+    console.error(
+      `[unarchiveNote] Error unarchiving note ${noteIdForError}:`,
+      err
+    );
     next(err);
   }
 };

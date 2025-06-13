@@ -23,6 +23,7 @@ export const createNoteSchema = Joi.object({
 export const updateNoteSchema = Joi.object({
   title: Joi.string().optional(),
   content: Joi.string().allow("").optional(),
+  isAutoSave: Joi.boolean().optional(), // Allow isAutoSave field
 });
 
 // Joi schema for sharing a note
