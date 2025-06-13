@@ -10,6 +10,7 @@ import {
   getNoteById,
   updateNote,
   deleteNote,
+  searchNotes, // Added searchNotes import
 } from "../controllers/noteCRUDController";
 
 import {
@@ -24,6 +25,9 @@ const router = express.Router();
 
 // Apply protect middleware to all note routes
 router.use(protect as RequestHandler);
+
+// Search route - Placed before routes with /:id to avoid conflict
+router.get("/search", searchNotes as RequestHandler);
 
 router
   .route("/")

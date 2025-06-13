@@ -550,3 +550,80 @@ export const deleteNote = async (
     next(err);
   }
 };
+
+export const searchNotes = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    if (!req.user || !req.user._id) {
+      res
+        .status(401)
+        .json({ message: "User not authenticated or user ID missing" });
+      return;
+    }
+    const userId = req.user._id as Types.ObjectId;
+    const query = (req.query.q as string) || "";
+
+    if (!query) {
+      res.status(400).json({ message: "Search query is required" });
+      return;
+    }
+
+    let notes;
+    // If the query is very short (e.g., 1 or 2 characters), a regex search might be more effective
+    // as text search might ignore very short terms or common words.
+    if (query.length <= 2) {
+      const regex = new RegExp(
+        query
+          .split("")
+          .map((char) => `(?=.*${char})`)
+          .join(""),
+        "i"
+      ); // Case-insensitive regex
+      notes = await Note.find({
+        $or: [{ title: { $regex: regex } }, { content: { $regex: regex } }],
+        isArchived: false,
+        $and: [{ $or: [{ creator: userId }, { "sharedWith.userId": userId }] }],
+      })
+        .populate<{ creator: IUser }>("creator", "username email _id")
+        .populate<{
+          sharedWith: Array<{
+            userId: IUser;
+            role: "read" | "write";
+            email: string;
+          }>;
+        }>({
+          path: "sharedWith.userId",
+          select: "username email _id",
+        })
+        .sort({ updatedAt: -1 }) // Sort by update date for regex search
+        .lean();
+    } else {
+      // Perform a text search on title and content for longer queries
+      notes = await Note.find({
+        $text: { $search: query },
+        isArchived: false,
+        $or: [{ creator: userId }, { "sharedWith.userId": userId }],
+      })
+        .populate<{ creator: IUser }>("creator", "username email _id")
+        .populate<{
+          sharedWith: Array<{
+            userId: IUser;
+            role: "read" | "write";
+            email: string;
+          }>;
+        }>({
+          path: "sharedWith.userId",
+          select: "username email _id",
+        })
+        .sort({ score: { $meta: "textScore" }, updatedAt: -1 }) // Sort by relevance, then by update date
+        .lean();
+    }
+
+    res.status(200).json(notes);
+  } catch (err) {
+    next(err);
+  }
+};

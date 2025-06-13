@@ -76,6 +76,9 @@ NoteSchema.index({ updatedAt: -1 });
 NoteSchema.index({ creator: 1, isArchived: 1, updatedAt: -1 }); // Compound index for fetching non-archived user notes
 NoteSchema.index({ "sharedWith.userId": 1, isArchived: 1, updatedAt: -1 }); // Compound index for fetching non-archived shared notes
 
+// Text index for searching title and content
+NoteSchema.index({ title: "text", content: "text" });
+
 // Compound indexes for common sort orders combined with filters
 NoteSchema.index({ creator: 1, updatedAt: -1 });
 NoteSchema.index({ "sharedWith.userId": 1, updatedAt: -1 });
