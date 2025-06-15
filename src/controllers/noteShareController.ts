@@ -3,7 +3,7 @@ import Note, { IShare } from "../models/Note"; // INote is defined in Note.ts
 import UserModel, { IUser } from "../models/User";
 import { AuthRequest } from "../middleware/authMiddleware";
 import mongoose, { Types } from "mongoose";
-import { io } from "../server";
+import { io } from "..";
 import { PopulatedNote, shareNoteSchema, checkPermissions } from "./noteUtils";
 
 const logger = {
