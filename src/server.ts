@@ -52,7 +52,7 @@ app.use("/api/users", userRoutes);
 
 // Root Route
 app.get("/", (_req: Request, res: Response) => {
-  res.send("Collaborative Notes API Running");
+  res.send("The Wavenet Solutions Notes API is now up and running.");
 });
 
 // Socket.IO connection
