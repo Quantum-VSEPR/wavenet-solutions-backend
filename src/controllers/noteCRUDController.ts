@@ -574,7 +574,7 @@ export const searchNotes = async (
     let notes;
     // If the query is very short (e.g., 1 or 2 characters), a regex search might be more effective
     // as text search might ignore very short terms or common words.
-    if (query.length <= 2) {
+    if (query.length <= 12) {
       const regex = new RegExp(
         query
           .split("")
