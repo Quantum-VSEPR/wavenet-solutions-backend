@@ -30,7 +30,13 @@ const io = new SocketIOServer(server, {
 
 // Middleware
 app.use(
-  cors({ origin: "https://wavenet-solution.vercel.app", credentials: true })
+  cors({
+    origin:
+      config.nodeEnv === "development"
+        ? "http://localhost:3000" // Your local frontend development URL
+        : process.env.FRONTEND_URL, // Your production frontend URL from env var
+    credentials: true,
+  })
 );
 app.use(helmet());
 app.use(morgan(config.nodeEnv === "development" ? "dev" : "combined"));
