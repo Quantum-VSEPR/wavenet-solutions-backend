@@ -30,7 +30,7 @@ const io = new SocketIOServer(server, {
 
 // Middleware
 app.use(
-  cors({ origin: "https://wavenet-solution.vercel.app", credentials: true })
+  cors({ origin: "https://wavenet-solution.vercel.app/api", credentials: true })
 );
 app.use(helmet());
 app.use(morgan(config.nodeEnv === "development" ? "dev" : "combined"));
