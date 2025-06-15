@@ -4,7 +4,7 @@ import Note from "../models/Note";
 import { AuthRequest } from "../middleware/authMiddleware";
 import { PopulatedNote, checkPermissions } from "./noteUtils";
 import { IUser } from "../models/User"; // Required for PopulatedNote and checkPermissions context
-import { io } from ".."; // For real-time updates
+import { io } from "../server"; // For real-time updates
 
 export const getArchivedNotes = async (
   req: AuthRequest,

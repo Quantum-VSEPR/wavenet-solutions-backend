@@ -3,7 +3,7 @@ import Note, { INote } from "../models/Note";
 import { IUser } from "../models/User"; // UserModel is not directly used here, but IUser is.
 import { AuthRequest } from "../middleware/authMiddleware";
 import mongoose, { Types } from "mongoose";
-import { io } from "..";
+import { io } from "../server";
 import {
   PopulatedNote,
   createNoteSchema,
